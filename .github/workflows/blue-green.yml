@@ -1,104 +1,63 @@
-# This is a basic workflow to help you get started with Actions
+name: Blue-Green Deployment
 
-name: Blue-Green-strategy
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the main branch
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-env:
-  ACR_NAME: demogaurav.azurecr.io
-  ACR_REPO_NAME: demogaurav.azurecr.io/docker-java-app
-  ARTIFACT_NAME: docker-java-app
-  RESOURCE_GROUP: Gaurav-RG
-  AKS_CLUSTER_NAME: Gaurav-AKS-cluster
-  
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  deployapp:
-    # The type of runner that the job will run on
+  deploy:
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
 
-      # This action can be used to set cluster context before other actions like azure/k8s-deploy, azure/k8s-create-secret or any kubectl commands (in script) can be run subsequently in the workflow.
-      - name: Set cluster context
-        uses: azure/aks-set-context@v1
+      - name: Set up Node.js (if applicable)
+        uses: actions/setup-node@v2
         with:
-          creds: '${{ secrets.AZURE_CREDENTIALS }}'
-          cluster-name: ${{ env.AKS_CLUSTER_NAME }}
-          resource-group: ${{ env.RESOURCE_GROUP }}
-      
-      # Runs a set of commands using the runners shell
-      - name: Deploy app
-        uses: azure/k8s-deploy@v1.3
-        with:
-          namespace: default
-          manifests: |
-            ./kubernetes/service.yaml
-            ./kubernetes/blue-deploy.yaml
-          images: |
-            demogaurav.azurecr.io/green-nginx:1
-          strategy: blue-green
-          traffic-split-method: pod
-          action: deploy  #deploy is the default; we will later use this to promote/reject
+          node-version: '14'
 
-  approveapp:
-    runs-on: ubuntu-latest
-    needs: deployapp
-    environment: akspromotion
-    steps:
-      - run: echo asked for approval
+      - name: Install dependencies
+        run: npm install
 
-  promotereject:
-    runs-on: ubuntu-latest
-    needs: approveapp
-    steps:
-      - uses: actions/checkout@v2
+      - name: Build project
+        run: npm run build
 
-      - name: Set cluster context
-        uses: azure/aks-set-context@v1
-        with:
-          creds: '${{ secrets.AZURE_CREDENTIALS }}'
-          cluster-name: ${{ env.AKS_CLUSTER_NAME }}
-          resource-group: ${{ env.RESOURCE_GROUP }}
+      - name: Deploy to Green Environment
+        run: |
+          ssh -o StrictHostKeyChecking=no $GREEN_HOST_USER@$GREEN_HOST 'bash -s' <<'EOF'
+          cd /path/to/app
+          git pull origin main
+          npm install
+          npm run start
+          EOF
+        env:
+          GREEN_HOST: ${{ secrets.GREEN_HOST }}
+          GREEN_HOST_USER: ${{ secrets.GREEN_HOST_USER }}
 
-      - name: Promote App
-        uses: azure/k8s-deploy@v1.3
-        if: ${{ success() }}
-        with:
-          namespace: default
-          manifests: |
-            ./kubernetes/service.yaml
-            ./kubernetes/green-deploy.yaml
-          images: |
-            demogaurav.azurecr.io/green-nginx:1
-          strategy: blue-green
-          traffic-split-method: pod
-          action: promote  #deploy is the default; we will later use this to promote/reject
+      - name: Health Check on Green Environment
+        run: curl --fail http://$GREEN_HOST:your_port/health || exit 1
+        env:
+          GREEN_HOST: ${{ secrets.GREEN_HOST }}
+        
+      - name: Switch Traffic to Green Environment
+        run: |
+          ssh -o StrictHostKeyChecking=no $BLUE_HOST_USER@$BLUE_HOST 'bash -s' <<'EOF'
+          # Update DNS or Load Balancer to point to Green Environment
+          # Example for AWS Route 53
+          aws route53 change-resource-record-sets --hosted-zone-id ZONE_ID --change-batch '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"yourapp.example.com","Type":"A","AliasTarget":{"HostedZoneId":"Z2P70J7EXAMPLE","DNSName":"'$GREEN_HOST'.example.com","EvaluateTargetHealth":false}}}]}' --profile your_aws_profile
+          EOF
+        env:
+          BLUE_HOST: ${{ secrets.BLUE_HOST }}
+          BLUE_HOST_USER: ${{ secrets.BLUE_HOST_USER }}
+          GREEN_HOST: ${{ secrets.GREEN_HOST }}
 
-      - name: Reject App
-        uses: azure/k8s-deploy@v1.3
-        if: ${{ failure() }}
-        with:
-          namespace: default
-          manifests: |
-            ./kubernetes/service.yaml
-            ./kubernetes/blue-deploy.yaml
-          images: |
-            demogaurav.azurecr.io/green-nginx:1
-          strategy: blue-green
-          traffic-split-method: pod
-          action: reject  #deploy is the default; we will later use this to promote/reject
-          
+      - name: Post-deployment Cleanup (Optional)
+        run: |
+          ssh -o StrictHostKeyChecking=no $BLUE_HOST_USER@$BLUE_HOST 'bash -s' <<'EOF'
+          # Optional: Clean up old blue environment, etc.
+          EOF
+        env:
+          BLUE_HOST: ${{ secrets.BLUE_HOST }}
+          BLUE_HOST_USER: ${{ secrets.BLUE_HOST_USER }}
